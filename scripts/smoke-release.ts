@@ -1,8 +1,8 @@
 import { cpSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { defaultBrokerEndpoint } from "../src/config";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { defaultBrokerEndpoint, defaultChromeExecutable } from "../src/config";
 import { VERSION } from "../src/version";
 
 const require = createRequire(import.meta.url);
@@ -57,6 +57,11 @@ if (version.exitCode !== 0 || version.stdout.toString().trim() !== VERSION) {
 
 const appHome = join(root, "app-state");
 const codexHome = join(root, "codex");
+const smokeBrowserExecutable = process.env.CODEX_CHATGPT_WEB_SMOKE_BROWSER_EXECUTABLE?.trim()
+  || defaultChromeExecutable();
+if (!isAbsolute(smokeBrowserExecutable)) {
+  throw new Error("CODEX_CHATGPT_WEB_SMOKE_BROWSER_EXECUTABLE must be an absolute path");
+}
 mkdirSync(join(appHome, "browser"), { recursive: true });
 mkdirSync(codexHome, { recursive: true });
 const portServer = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
@@ -71,7 +76,7 @@ const config = {
   contextWindow: 256_000,
   appName: "Codex Native",
   browserHost: "managed-chrome",
-  chromeExecutablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  chromeExecutablePath: smokeBrowserExecutable,
   storageStatePath: join(appHome, "browser", "storage-state.json"),
   brokerSocketPath: defaultBrokerEndpoint(appHome),
   headed: true,

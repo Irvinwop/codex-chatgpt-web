@@ -5,6 +5,10 @@ contract on macOS, Windows, and Linux. It does not prove an authenticated ChatGP
 MCP connector, or a complete Codex turn. A release candidate is not ready until those account-bound
 flows are exercised manually on the platforms below.
 
+For local release verification on a machine without Google Chrome at the platform default, set
+`CODEX_CHATGPT_WEB_SMOKE_BROWSER_EXECUTABLE` to the absolute path of a compatible Chromium
+executable. The override applies only to the isolated release smoke profile.
+
 ## Required evidence
 
 Record the release version, operating-system version, install path (`clean` or `upgrade`), ChatGPT
