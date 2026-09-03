@@ -372,10 +372,12 @@ describe("trusted current Codex environment envelope", () => {
     });
   });
 
-  test("does not infer an omitted cwd from ambiguous metadata workspace roots", () => {
-    const secondary = resolve(root, "secondary-workspace");
+  test("recovers the ordered project cwd when metadata also lists the visualization root", () => {
+    const codexHome = resolve(process.env.CODEX_HOME?.trim() || join(homedir(), ".codex"));
+    const visualizationRoot = join(codexHome, "visualizations", "2026", "09", "03", "thread_current");
     const cwdDiff = `<environment_context>
-  <filesystem><workspace_roots><root>${root}</root><root>${secondary}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+  <current_date>2026-09-03</current_date>
+  <filesystem><workspace_roots><root>${root}</root><root>${visualizationRoot}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
 </environment_context>`;
     const request = currentWire({ environmentXml: cwdDiff });
     const body = request._rawBody as { client_metadata: Record<string, string> };
@@ -385,11 +387,17 @@ describe("trusted current Codex environment envelope", () => {
       sandbox: "none",
       workspaces: {
         [root]: { has_changes: true },
-        [secondary]: { has_changes: false },
+        [visualizationRoot]: { has_changes: false },
       },
     });
 
-    expect(() => extractChatGptTurnEnvironment(request)).toThrow("missing cwd");
+    expect(extractChatGptTurnEnvironment(request)).toEqual({
+      cwd: root,
+      roots: [root, visualizationRoot],
+      writableRoots: [root, visualizationRoot],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    });
   });
 
   test("uses the primary cwd from Codex's canonical multi-environment envelope", () => {
