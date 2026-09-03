@@ -62,6 +62,35 @@ function containsOpaqueEncryptedContent(value: unknown): boolean {
     && block.encrypted_content.length > 0);
 }
 
+const HISTORICAL_ENCRYPTED_AGENT_MESSAGE_NOTE =
+  "[Historical encrypted cross-backend subagent payload omitted; surrounding task history is preserved.]";
+
+function nativeTurnId(body: unknown): string | undefined {
+  if (!isObj(body) || !isObj(body.client_metadata)) return undefined;
+  const encoded = body.client_metadata["x-codex-turn-metadata"];
+  if (typeof encoded !== "string" || encoded.length === 0) return undefined;
+  try {
+    const metadata: unknown = JSON.parse(encoded);
+    if (!isObj(metadata)) return undefined;
+    return typeof metadata.turn_id === "string" && metadata.turn_id.length > 0
+      ? metadata.turn_id
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function appendHistoricalEncryptedAgentMessageNote(
+  content: string | CodexContentPart[],
+): string | CodexContentPart[] {
+  if (typeof content === "string") {
+    return content.length > 0
+      ? `${content}\n${HISTORICAL_ENCRYPTED_AGENT_MESSAGE_NOTE}`
+      : HISTORICAL_ENCRYPTED_AGENT_MESSAGE_NOTE;
+  }
+  return [...content, { type: "text", text: HISTORICAL_ENCRYPTED_AGENT_MESSAGE_NOTE }];
+}
+
 type OutputBlock = { type: "output_text"; text: string } | { type: "text"; text: string } | { type: "refusal"; refusal: string };
 
 function outputTextOf(blocks: unknown[] | string | undefined): CodexTextContent[] {
@@ -283,6 +312,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
     throw new Error(`responses parse error: ${parsed.error.message}`);
   }
   const data = parsed.data;
+  const currentTurnId = nativeTurnId(body);
   const now = Date.now();
   const messages: CodexMessage[] = [];
   const systemPrompt: string[] = [];
@@ -355,15 +385,27 @@ export function parseRequest(body: unknown): CodexParsedRequest {
           author?: string;
           recipient?: string;
           content?: unknown;
+          internal_chat_message_metadata_passthrough?: { turn_id?: unknown };
         };
 
-        if (containsOpaqueEncryptedContent(agentMessage.content)) {
+        const containsOpaquePayload = containsOpaqueEncryptedContent(agentMessage.content);
+        const messageTurnId = agentMessage.internal_chat_message_metadata_passthrough?.turn_id;
+        const historicalOpaquePayload = containsOpaquePayload
+          && typeof messageTurnId === "string"
+          && messageTurnId.length > 0
+          && typeof currentTurnId === "string"
+          && messageTurnId !== currentTurnId;
+
+        if (containsOpaquePayload && !historicalOpaquePayload) {
           opaqueMultiAgentV2Payload = true;
         }
 
-        const content = inputContentParts(
+        let content = inputContentParts(
           agentMessage.content as unknown[] | string | undefined,
         );
+        if (historicalOpaquePayload) {
+          content = appendHistoricalEncryptedAgentMessageNote(content);
+        }
 
         // An agent_message is external input delivered to the parent agent. Keep its distinct
         // role and routing metadata so Web history remains semantically equivalent to Responses.

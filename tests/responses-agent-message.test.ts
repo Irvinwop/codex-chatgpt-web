@@ -100,3 +100,70 @@ test("agent messages do not invent missing routing identity or fallback content"
   const messages = inlineMessages(compileChatGptWebPrompt(parsed, capabilities, turnToken).text);
   expect(messages[0]).toEqual({ role: "agent_message", content: "" });
 });
+
+test("historical encrypted V2 agent messages retain routing and degrade only the opaque body", () => {
+  const parsed = parseRequest({
+    model: CHATGPT_WEB_MODEL_ID,
+    stream: true,
+    client_metadata: {
+      "x-codex-turn-metadata": JSON.stringify({
+        thread_id: "thread_history",
+        turn_id: "turn_current",
+      }),
+    },
+    input: [
+      {
+        type: "agent_message",
+        author: "/root/worker",
+        recipient: "/root",
+        content: [
+          { type: "input_text", text: "Message Type: FINAL_ANSWER\nPayload:\n" },
+          { type: "encrypted_content", encrypted_content: "gAAAAABhistorical-native-v2-payload" },
+        ],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn_historical" },
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Continue with the preserved task history." }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn_current" },
+      },
+    ],
+  });
+
+  expect(parsed._opaqueMultiAgentV2Payload).toBeUndefined();
+  const historicalMessage = parsed.context.messages[0] as { content: string };
+  expect(historicalMessage).toMatchObject({
+    role: "agentMessage",
+    author: "/root/worker",
+    recipient: "/root",
+  });
+  expect(typeof historicalMessage.content).toBe("string");
+  expect(historicalMessage.content.includes("Historical encrypted cross-backend subagent payload omitted")).toBe(true);
+  expect(historicalMessage.content.includes("Message Type: FINAL_ANSWER")).toBe(true);
+});
+
+test("current-turn encrypted V2 agent messages still fail closed", () => {
+  const parsed = parseRequest({
+    model: CHATGPT_WEB_MODEL_ID,
+    stream: true,
+    client_metadata: {
+      "x-codex-turn-metadata": JSON.stringify({
+        thread_id: "thread_child",
+        turn_id: "turn_child",
+      }),
+    },
+    input: [{
+      type: "agent_message",
+      author: "/root",
+      recipient: "/root/child",
+      content: [
+        { type: "input_text", text: "Message Type: NEW_TASK\nPayload:\n" },
+        { type: "encrypted_content", encrypted_content: "gAAAAABcurrent-native-v2-payload" },
+      ],
+      internal_chat_message_metadata_passthrough: { turn_id: "turn_child" },
+    }],
+  });
+
+  expect(parsed._opaqueMultiAgentV2Payload).toBe(true);
+});

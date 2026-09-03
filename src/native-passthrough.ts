@@ -131,14 +131,16 @@ const MULTI_AGENT_V2_MESSAGE_TOOLS = new Set([
   "send_message",
   "followup_task",
 ]);
+const RESERVED_MULTI_AGENT_V2_NAMESPACE = "collaboration";
+const PLAINTEXT_MULTI_AGENT_V2_NAMESPACE = "codex_web_collaboration";
 
 interface PlaintextMultiAgentV2Surface {
-  namespaces: Set<string>;
+  responseNamespaces: Map<string, string>;
   unnamespaced: boolean;
 }
 
 function emptyPlaintextMultiAgentV2Surface(): PlaintextMultiAgentV2Surface {
-  return { namespaces: new Set(), unnamespaced: false };
+  return { responseNamespaces: new Map(), unnamespaced: false };
 }
 
 function isMultiAgentV2Namespace(tool: JsonObject): tool is JsonObject & { name: string; tools: unknown[] } {
@@ -152,6 +154,32 @@ function isMultiAgentV2Namespace(tool: JsonObject): tool is JsonObject & { name:
     ? [inner.name]
     : []));
   return [...MULTI_AGENT_V2_MESSAGE_TOOLS].every(name => names.has(name));
+}
+
+function namespaceNames(tools: unknown[]): string[] {
+  return tools.flatMap(tool => isObject(tool)
+    && tool.type === "namespace"
+    && typeof tool.name === "string"
+    ? [tool.name]
+    : []);
+}
+
+function plaintextMultiAgentV2NamespaceAlias(value: JsonObject): string {
+  const occupied = new Set<string>();
+  if (Array.isArray(value.tools)) {
+    for (const name of namespaceNames(value.tools)) occupied.add(name);
+  }
+  if (Array.isArray(value.input)) {
+    for (const item of value.input) {
+      if (!isObject(item) || item.type !== "additional_tools" || !Array.isArray(item.tools)) continue;
+      for (const name of namespaceNames(item.tools)) occupied.add(name);
+    }
+  }
+  let alias = PLAINTEXT_MULTI_AGENT_V2_NAMESPACE;
+  for (let suffix = 2; occupied.has(alias); suffix += 1) {
+    alias = `${PLAINTEXT_MULTI_AGENT_V2_NAMESPACE}_${suffix}`;
+  }
+  return alias;
 }
 
 function plaintextMultiAgentV2MessageTool(tool: unknown): { tool: unknown; changed: boolean } {
@@ -183,6 +211,7 @@ function plaintextMultiAgentV2MessageTool(tool: unknown): { tool: unknown; chang
 function plaintextMultiAgentV2ToolSchemas(
   tools: unknown[],
   surface: PlaintextMultiAgentV2Surface,
+  reservedNamespaceAlias: string,
 ): { tools: unknown[]; changed: boolean } {
   let changed = false;
   const topLevelNames = new Set(tools.flatMap(tool => isObject(tool)
@@ -200,8 +229,14 @@ function plaintextMultiAgentV2ToolSchemas(
       return result.tool;
     }
     if (!isObject(tool) || !isMultiAgentV2Namespace(tool)) return tool;
-    surface.namespaces.add(tool.name);
-    let namespaceChanged = false;
+    const nativeNamespace = tool.name;
+    const upstreamNamespace = nativeNamespace === RESERVED_MULTI_AGENT_V2_NAMESPACE
+      ? reservedNamespaceAlias
+      : nativeNamespace;
+    surface.responseNamespaces.set(upstreamNamespace, nativeNamespace);
+    surface.responseNamespaces.set(nativeNamespace, nativeNamespace);
+    let namespaceChanged = upstreamNamespace !== nativeNamespace;
+    if (namespaceChanged) changed = true;
     const innerTools = tool.tools.map(inner => {
       const result = plaintextMultiAgentV2MessageTool(inner);
       if (!result.changed) return inner;
@@ -209,7 +244,7 @@ function plaintextMultiAgentV2ToolSchemas(
       namespaceChanged = true;
       return result.tool;
     });
-    return namespaceChanged ? { ...tool, tools: innerTools } : tool;
+    return namespaceChanged ? { ...tool, name: upstreamNamespace, tools: innerTools } : tool;
   });
   return { tools: changed ? rewritten : tools, changed };
 }
@@ -221,13 +256,14 @@ function plaintextMultiAgentV2MessageSchemas(value: unknown): {
 } {
   const surface = emptyPlaintextMultiAgentV2Surface();
   if (!isObject(value)) return { value, changed: false, surface };
+  const reservedNamespaceAlias = plaintextMultiAgentV2NamespaceAlias(value);
   const topLevel = Array.isArray(value.tools)
-    ? plaintextMultiAgentV2ToolSchemas(value.tools, surface)
+    ? plaintextMultiAgentV2ToolSchemas(value.tools, surface, reservedNamespaceAlias)
     : { tools: value.tools, changed: false };
   let inputChanged = false;
   const input = Array.isArray(value.input) ? value.input.map(item => {
     if (!isObject(item) || item.type !== "additional_tools" || !Array.isArray(item.tools)) return item;
-    const rewritten = plaintextMultiAgentV2ToolSchemas(item.tools, surface);
+    const rewritten = plaintextMultiAgentV2ToolSchemas(item.tools, surface, reservedNamespaceAlias);
     if (!rewritten.changed) return item;
     inputChanged = true;
     return { ...item, tools: rewritten.tools };
@@ -333,16 +369,24 @@ function markPlaintextMultiAgentV2Calls(
   }
   if (!isObject(value)) return false;
   let changed = false;
-  const surfaceMatches = typeof value.namespace === "string"
-    ? surface.namespaces.has(value.namespace)
-    : value.namespace === undefined && surface.unnamespaced;
-  if (value.type === "function_call"
-    && surfaceMatches
-    && typeof value.name === "string"
-    && MULTI_AGENT_V2_MESSAGE_TOOLS.has(value.name)
-    && value.encrypted_function_args === undefined) {
-    value.encrypted_function_args = [];
-    changed = true;
+  if (value.type === "function_call" && typeof value.name === "string") {
+    let surfaceMatches = value.namespace === undefined && surface.unnamespaced;
+    if (typeof value.namespace === "string") {
+      const nativeNamespace = surface.responseNamespaces.get(value.namespace);
+      if (nativeNamespace !== undefined) {
+        surfaceMatches = true;
+        if (nativeNamespace !== value.namespace) {
+          value.namespace = nativeNamespace;
+          changed = true;
+        }
+      }
+    }
+    if (surfaceMatches
+      && MULTI_AGENT_V2_MESSAGE_TOOLS.has(value.name)
+      && value.encrypted_function_args === undefined) {
+      value.encrypted_function_args = [];
+      changed = true;
+    }
   }
   for (const child of Object.values(value)) {
     if (markPlaintextMultiAgentV2Calls(child, surface)) changed = true;
@@ -443,7 +487,7 @@ export async function forwardNativeCodexRequest(
   const contentType = (upstream.headers.get("content-type") ?? "").toLowerCase();
   const isEventStream = contentType.includes("text/event-stream");
   const rewritePlaintextCalls = plaintextSurface.unnamespaced
-    || plaintextSurface.namespaces.size > 0;
+    || plaintextSurface.responseNamespaces.size > 0;
   if (rewritePlaintextCalls && upstream.body && contentType.includes("application/json")) {
     const original = await upstream.text();
     let rewritten = original;

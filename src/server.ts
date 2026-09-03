@@ -397,9 +397,8 @@ export async function responseRequest(
     return formatErrorResponse(
       400,
       "invalid_request_error",
-      "ChatGPT Web cannot read this encrypted cross-backend subagent payload. "
-        + "Restart Codex Web GPT and Codex, then start a new Native V2 task; "
-        + "use Compatibility V1 if the native backend still requires encrypted delegation.",
+      "ChatGPT Web cannot read this current-turn encrypted cross-backend subagent payload. "
+        + "Use a Native V2 runtime with plaintext collaboration delivery, or use Compatibility V1 for this delegation.",
     );
   }
   if (typeof requestedPreviousResponseId === "string" && expanded === raw) {

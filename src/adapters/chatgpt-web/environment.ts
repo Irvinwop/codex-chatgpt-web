@@ -277,9 +277,12 @@ function environmentMatchesCanonicalMetadata(
   } catch {
     return false;
   }
+  if (cwdMatches.length === 0 && !/<cwd>[^<]*<\/cwd>/i.test(environmentText)) {
+    const inferred = metadataAuthenticatedCwd(environmentText, normalizedMetadataRoots);
+    if (inferred) cwdMatches = [inferred];
+  }
   if (cwdMatches.length !== 1 || !isAbsolute(cwdMatches[0]!)) return false;
-  const rootMatches = [...environmentText.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/g)]
-    .flatMap(section => [...section[0].matchAll(/<root>([^<]+)<\/root>/g)].map(match => decodeXmlText(match[1]!.trim())));
+  const rootMatches = environmentWorkspaceRoots(environmentText);
   const declaredRootValues = rootMatches.length > 0 ? rootMatches : cwdMatches;
   if (declaredRootValues.some(path => !isAbsolute(path))) return false;
   const declaredRoots = [...new Set(declaredRootValues.map(pathIdentity))];
@@ -527,6 +530,27 @@ function environmentCwdMatches(text: string, preferredRoots: string[] = []): str
   return contained.length === 1 ? contained : [];
 }
 
+function environmentWorkspaceRoots(text: string): string[] {
+  return [...text.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/gi)]
+    .flatMap(section => [...section[0].matchAll(/<root>([^<]+)<\/root>/gi)]
+      .map(match => decodeXmlText((match[1] ?? "").trim())));
+}
+
+/**
+ * New Codex world-state diffs can omit an unchanged cwd while still sending filesystem roots.
+ * Recover only an exact, unique root that is independently authenticated by canonical turn
+ * metadata. Never choose by XML order or infer from an auxiliary visualization/output root.
+ */
+function metadataAuthenticatedCwd(text: string, metadataRoots: string[]): string | undefined {
+  if (metadataRoots.length === 0 || /<cwd>[^<]*<\/cwd>/i.test(text)) return undefined;
+  const declared = environmentWorkspaceRoots(text);
+  if (declared.length === 0 || declared.some(path => !isAbsolute(path))) return undefined;
+  const uniqueDeclared = [...new Map(declared.map(path => [pathIdentity(path), resolve(path)])).values()];
+  const exact = uniqueDeclared.filter(path => metadataRoots
+    .some(root => pathIdentity(root) === pathIdentity(path)));
+  return exact.length === 1 ? exact[0] : undefined;
+}
+
 function uniqueAbsolutePaths(values: string[], field: string): string[] {
   const decoded = values.map(value => decodeXmlText(value.trim()));
   if (decoded.length === 0) throw new MissingTrustedCodexEnvironmentError(field);
@@ -545,13 +569,17 @@ function matchesPath(root: string, path: string): boolean {
 
 export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
   const text = trustedEnvironmentText(parsed);
-  const cwdMatches = environmentCwdMatches(text, clientMetadataWorkspaceRoots(parsed));
+  const metadataRoots = clientMetadataWorkspaceRoots(parsed);
+  let cwdMatches = environmentCwdMatches(text, metadataRoots);
+  if (cwdMatches.length === 0 && !/<cwd>[^<]*<\/cwd>/i.test(text)) {
+    const inferred = metadataAuthenticatedCwd(text, metadataRoots);
+    if (inferred) cwdMatches = [inferred];
+  }
   const cwdCandidates = uniqueAbsolutePaths(cwdMatches, "cwd");
   if (cwdCandidates.length !== 1) throw new Error("ChatGPT web turn has conflicting trusted Codex cwd values");
   const cwd = cwdCandidates[0]!;
 
-  const rootMatches = [...text.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/g)]
-    .flatMap(section => [...section[0].matchAll(/<root>([^<]+)<\/root>/g)].map(match => match[1] ?? ""));
+  const rootMatches = environmentWorkspaceRoots(text);
   const roots = rootMatches.length > 0 ? uniqueAbsolutePaths(rootMatches, "workspace_roots") : [cwd];
   if (!roots.some(root => matchesPath(root, cwd))) {
     throw new Error("ChatGPT web cwd is outside the trusted Codex workspace roots");

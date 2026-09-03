@@ -38,7 +38,7 @@ test("forwards native Codex requests verbatim to the official backend", async ()
   expect(await response.text()).toBe("data: native\n\n");
 });
 
-test("Native V2 removes encryption from collaboration message schemas", async () => {
+test("Native V2 aliases the reserved collaboration namespace and removes message encryption", async () => {
   const body = {
     model: "gpt-5.6-sol",
     stream: true,
@@ -108,8 +108,9 @@ test("Native V2 removes encryption from collaboration message schemas", async ()
 
   expect(upstreamRequest!.headers.get("content-encoding")).toBeNull();
   const forwarded = await upstreamRequest!.json() as {
-    tools: Array<{ tools: Array<{ name: string; parameters: { properties: Record<string, Record<string, unknown>> } }> }>;
+    tools: Array<{ name: string; tools: Array<{ name: string; parameters: { properties: Record<string, Record<string, unknown>> } }> }>;
   };
+  expect(forwarded.tools[0]!.name).toBe("codex_web_collaboration");
   const tools = forwarded.tools[0]!.tools;
   for (const name of ["spawn_agent", "send_message", "followup_task"]) {
     expect(tools.find(tool => tool.name === name)!.parameters.properties.message)
@@ -146,7 +147,7 @@ test("Native V2 marks plaintext collaboration calls for Codex delivery", async (
     item: {
       type: "function_call",
       name: "spawn_agent",
-      namespace: "collaboration",
+      namespace: "codex_web_collaboration",
       call_id: "call_plaintext_spawn",
       arguments: JSON.stringify({ task_name: "inspect", message: "Inspect the repository" }),
     },
@@ -197,7 +198,7 @@ test("Native V2 preserves encrypted and unrelated collaboration calls", async ()
     item: {
       type: "function_call",
       name: "spawn_agent",
-      namespace: "collaboration",
+      namespace: "codex_web_collaboration",
       call_id: "call_encrypted_spawn",
       arguments: "opaque",
       encrypted_function_args: ["ciphertext"],
@@ -208,7 +209,7 @@ test("Native V2 preserves encrypted and unrelated collaboration calls", async ()
     item: {
       type: "function_call",
       name: "wait_agent",
-      namespace: "collaboration",
+      namespace: "codex_web_collaboration",
       call_id: "call_wait",
       arguments: JSON.stringify({ timeout_ms: 500 }),
     },
@@ -224,7 +225,9 @@ test("Native V2 preserves encrypted and unrelated collaboration calls", async ()
     .filter(line => line.startsWith("data: {") && line.includes("function_call"))
     .map(line => JSON.parse(line.slice(6)) as { item: Record<string, unknown> });
   expect(events[0]!.item.encrypted_function_args).toEqual(["ciphertext"]);
+  expect(events[0]!.item.namespace).toBe("collaboration");
   expect(events[1]!.item).not.toHaveProperty("encrypted_function_args");
+  expect(events[1]!.item.namespace).toBe("collaboration");
 });
 
 test("Native V2 rewrites Responses Lite additional collaboration tools", async () => {
@@ -263,8 +266,9 @@ test("Native V2 rewrites Responses Lite additional collaboration tools", async (
   }, body, { plaintextMultiAgentV2Messages: true });
 
   const forwarded = await upstreamRequest!.json() as {
-    input: Array<{ tools: Array<{ tools: Array<{ parameters: { properties: { message: Record<string, unknown> } } }> }> }>;
+    input: Array<{ tools: Array<{ name: string; tools: Array<{ parameters: { properties: { message: Record<string, unknown> } } }> }> }>;
   };
+  expect(forwarded.input[0]!.tools[0]!.name).toBe("codex_web_collaboration");
   expect(forwarded.input[0]!.tools[0]!.tools[0]!.parameters.properties.message)
     .not.toHaveProperty("encrypted");
 });
@@ -404,14 +408,73 @@ test("Native V2 marks plaintext collaboration calls in JSON responses", async ()
     output: [{
       type: "function_call",
       name: "send_message",
-      namespace: "collaboration",
+      namespace: "codex_web_collaboration",
       call_id: "call_json_message",
       arguments: JSON.stringify({ target: "/root/inspect", message: "Status?" }),
     }],
   }), body, { plaintextMultiAgentV2Messages: true });
 
   expect(await response.json()).toMatchObject({
-    output: [{ encrypted_function_args: [] }],
+    output: [{ namespace: "collaboration", encrypted_function_args: [] }],
+  });
+});
+
+test("Native V2 avoids an existing compatibility namespace without rewriting unrelated calls", async () => {
+  const messageTool = (name: string) => ({
+    type: "function",
+    name,
+    parameters: {
+      type: "object",
+      properties: { message: { type: "string", encrypted: true } },
+    },
+  });
+  const body = {
+    model: "gpt-5.6-sol",
+    stream: true,
+    tools: [
+      { type: "namespace", name: "codex_web_collaboration", tools: [{
+        type: "function",
+        name: "unrelated",
+        parameters: { type: "object", properties: {} },
+      }] },
+      { type: "namespace", name: "collaboration", tools: [
+        messageTool("spawn_agent"),
+        messageTool("send_message"),
+        messageTool("followup_task"),
+      ] },
+    ],
+  };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let upstreamRequest: Request | undefined;
+  const response = await forwardNativeCodexRequest(request, "responses", async input => {
+    upstreamRequest = input;
+    return Response.json({
+      output: [
+        { type: "function_call", name: "send_message", namespace: "codex_web_collaboration_2", arguments: "{}" },
+        { type: "function_call", name: "unrelated", namespace: "codex_web_collaboration", arguments: "{}" },
+      ],
+    });
+  }, body, { plaintextMultiAgentV2Messages: true });
+
+  const forwarded = await upstreamRequest!.json() as { tools: Array<{ name: string }> };
+  expect(forwarded.tools.map(tool => tool.name)).toEqual([
+    "codex_web_collaboration",
+    "codex_web_collaboration_2",
+  ]);
+  const parsed = await response.json() as { output: Array<Record<string, unknown>> };
+  expect(parsed.output[0]).toMatchObject({
+    namespace: "collaboration",
+    encrypted_function_args: [],
+  });
+  expect(parsed.output[1]).toEqual({
+    type: "function_call",
+    name: "unrelated",
+    namespace: "codex_web_collaboration",
+    arguments: "{}",
   });
 });
 

@@ -15,9 +15,11 @@ export interface CodexParsedRequest {
    */
   _compactionRequest?: boolean;
   /**
-   * True when Codex MultiAgent V2 delegated an agent_message as provider-private encrypted_content.
-   * ChatGPT Web has no OpenAI backend key for that blob; the Responses HTTP boundary rejects it
-   * before constructing the browser adapter.
+   * True when the current Codex MultiAgent V2 turn was delegated as provider-private
+   * encrypted_content, or when native turn identity is unavailable. ChatGPT Web has no OpenAI
+   * backend key for that blob; the Responses HTTP boundary rejects it before constructing the
+   * browser adapter. Historical opaque agent messages degrade to an explicit placeholder instead,
+   * preserving the surrounding task transcript for cross-backend continuation.
    */
   _opaqueMultiAgentV2Payload?: boolean;
 }

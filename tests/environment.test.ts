@@ -355,6 +355,43 @@ describe("trusted current Codex environment envelope", () => {
     });
   });
 
+  test("recovers an omitted cwd from one metadata-authenticated workspace root", () => {
+    const codexHome = resolve(process.env.CODEX_HOME?.trim() || join(homedir(), ".codex"));
+    const visualizationRoot = join(codexHome, "visualizations", "2026", "09", "03", "thread_current");
+    const cwdDiff = `<environment_context>
+  <current_date>2026-09-03</current_date>
+  <filesystem><workspace_roots><root>${root}</root><root>${visualizationRoot}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+</environment_context>`;
+
+    expect(extractChatGptTurnEnvironment(currentWire({ environmentXml: cwdDiff }))).toEqual({
+      cwd: root,
+      roots: [root, visualizationRoot],
+      writableRoots: [root, visualizationRoot],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    });
+  });
+
+  test("does not infer an omitted cwd from ambiguous metadata workspace roots", () => {
+    const secondary = resolve(root, "secondary-workspace");
+    const cwdDiff = `<environment_context>
+  <filesystem><workspace_roots><root>${root}</root><root>${secondary}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+</environment_context>`;
+    const request = currentWire({ environmentXml: cwdDiff });
+    const body = request._rawBody as { client_metadata: Record<string, string> };
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      thread_id: "thread_current",
+      turn_id: "turn_current",
+      sandbox: "none",
+      workspaces: {
+        [root]: { has_changes: true },
+        [secondary]: { has_changes: false },
+      },
+    });
+
+    expect(() => extractChatGptTurnEnvironment(request)).toThrow("missing cwd");
+  });
+
   test("uses the primary cwd from Codex's canonical multi-environment envelope", () => {
     const secondary = resolve(root, "secondary-environment");
     const multiEnvironment = `<environment_context>
